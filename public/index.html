@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0f1117">
+  <title>Project Saver</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- Login page -->
+<div id="login-page" class="login-wrap" style="display:none">
+  <div class="login-card">
+    <h1>🛡️ Project Saver</h1>
+    <p class="subtitle">Server Management Dashboard</p>
+    <div id="login-error" class="login-error"></div>
+    <form id="login-form">
+      <div class="field">
+        <label for="email">Email</label>
+        <input type="email" id="login-email" placeholder="you@example.com" required autocomplete="email">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="login-password" placeholder="••••••••" required autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn-primary" id="login-btn">Sign In</button>
+    </form>
+  </div>
+</div>
+
+<!-- App shell -->
+<div id="app-shell" class="app-shell" style="display:none">
+  <!-- Hamburger -->
+  <button class="hamburger" id="hamburger-btn">☰</button>
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="icon">🛡️</span>
+      <span>Project Saver</span>
+    </div>
+    <nav>
+      <a href="#dashboard" data-page="dashboard" class="active">
+        <span class="nav-icon">📊</span> Dashboard
+      </a>
+      <a href="#containers" data-page="containers">
+        <span class="nav-icon">🐳</span> Containers
+      </a>
+      <a href="#services" data-page="services">
+        <span class="nav-icon">⚙️</span> Services
+      </a>
+      <a href="#nexus" data-page="nexus">
+        <span class="nav-icon">🔮</span> Nexus
+      </a>
+      <a href="#vscode" data-page="vscode">
+        <span class="nav-icon">💻</span> VS Code
+      </a>
+      <a href="#settings" data-page="settings">
+        <span class="nav-icon">🔧</span> Settings
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-info" id="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <span id="user-name">Devin</span>
+      </div>
+      <div style="margin-top:.5rem">
+        <a href="#" id="logout-btn" style="color:var(--text2);font-size:.82rem">Sign out</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main" id="main-content">
+    <!-- Pages rendered here by JS -->
+  </main>
+</div>
+
+<!-- Toast -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
