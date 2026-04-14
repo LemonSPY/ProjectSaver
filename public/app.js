@@ -635,23 +635,18 @@ window.loadNexusDB = async function() {
   }
 };
 
-// ── Page: VS Code (combined screen + chat) ──────────────
-let screenInterval = null;
-let screenStreamActive = true;
+
+// ── Page: VS Code (workspace view + chat) ───────────────
 let chatWs = null;
 let chatWsReconnect = null;
 let chatStreamingId = null;
 let chatStreamingText = '';
 let chatIncludeContext = true;
-let vscodeTab = 'screen';
+let vscodeTab = 'workspace';
 
 pages.vscode = async (el) => {
-  if (screenInterval) { clearInterval(screenInterval); screenInterval = null; }
   if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
   if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
-
-  let meta;
-  try { meta = await api('/vscode/screenshot/meta'); } catch { meta = { available: false }; }
 
   el.innerHTML = `
     <div class="vsc-page">
@@ -660,47 +655,43 @@ pages.vscode = async (el) => {
           <div class="chat-status-dot" id="chat-ext-dot" title="Extension status"></div>
           <div class="vsc-topbar-info">
             <div class="vsc-topbar-title" id="chat-title">VS Code</div>
-            <div class="vsc-topbar-sub" id="chat-subtitle">Connecting…</div>
+            <div class="vsc-topbar-sub" id="chat-subtitle">Connecting\u2026</div>
           </div>
         </div>
         <div class="vsc-tabs">
-          <button class="vsc-tab active" id="vsc-tab-screen" onclick="switchVscTab('screen')">🖥️ Screen</button>
-          <button class="vsc-tab" id="vsc-tab-chat" onclick="switchVscTab('chat')">💬 Chat</button>
+          <button class="vsc-tab active" id="vsc-tab-workspace" onclick="switchVscTab('workspace')">\uD83D\uDCC2 Workspace</button>
+          <button class="vsc-tab" id="vsc-tab-chat" onclick="switchVscTab('chat')">\uD83D\uDCAC Chat</button>
         </div>
       </div>
-      <div class="vsc-panel vsc-panel-screen" id="vsc-panel-screen">
-        <div class="vsc-screen-bar">
-          <div style="display:flex;align-items:center;gap:.5rem">
-            <span id="screen-status" class="badge ${meta.available ? 'badge-green' : 'badge-red'}">${meta.available ? '● LIVE' : '● OFFLINE'}</span>
-            <span id="screen-age" style="font-size:.78rem;color:var(--text2)"></span>
+
+      <!-- Workspace Panel -->
+      <div class="vsc-panel" id="vsc-panel-workspace">
+        <div class="ws-info" id="ws-info">
+          <div class="ws-empty" id="ws-empty">
+            <div style="font-size:2rem;margin-bottom:.5rem">\u23F3</div>
+            <p>Waiting for VS Code\u2026</p>
+            <p class="ws-empty-sub">Install the Project Saver extension and connect</p>
           </div>
-          <div class="btn-group">
-            <button class="btn btn-sm" id="screen-toggle" onclick="toggleScreenStream()">⏸</button>
-            <button class="btn btn-sm" onclick="screenFullscreen()">⛶</button>
-          </div>
-        </div>
-        <div id="screen-container" class="vsc-screen-container">
-          ${meta.available
-            ? '<img id="screen-img" style="width:100%;display:block;cursor:zoom-in" onclick="screenFullscreen()">'
-            : '<div class="empty-state" style="padding:3rem 1rem"><div class="empty-icon">🖥️</div><p>Screen agent offline</p><p style="font-size:.82rem;color:var(--text2);margin-top:.3rem">Run <code style="background:var(--bg);padding:.15rem .4rem;border-radius:3px">node screen-agent.js</code> on your PC</p></div>'}
         </div>
       </div>
+
+      <!-- Chat Panel -->
       <div class="vsc-panel vsc-panel-chat" id="vsc-panel-chat" style="display:none">
         <div class="vsc-chat-actions">
-          <button class="btn btn-sm" id="chat-ctx-toggle" onclick="toggleChatContext()">📎 Context</button>
+          <button class="btn btn-sm" id="chat-ctx-toggle" onclick="toggleChatContext()">\uD83D\uDCCE Context</button>
           <div class="chat-workspace-badge" id="chat-workspace-badge"></div>
-          <button class="btn btn-sm btn-danger" onclick="clearChatHistory()" style="margin-left:auto">🗑️</button>
+          <button class="btn btn-sm btn-danger" onclick="clearChatHistory()" style="margin-left:auto">\uD83D\uDDD1\uFE0F</button>
         </div>
         <div class="chat-messages" id="chat-messages">
           <div class="chat-empty" id="chat-empty">
-            <div style="font-size:2rem;margin-bottom:.4rem">💬</div>
+            <div style="font-size:2rem;margin-bottom:.4rem">\uD83D\uDCAC</div>
             <p>Chat with Copilot</p>
             <p class="chat-empty-sub">Type below to talk to the AI agent in VS Code</p>
           </div>
         </div>
         <div class="chat-input-bar">
           <div class="chat-input-row">
-            <textarea id="chat-input" placeholder="Ask Copilot anything…" rows="1" autocomplete="off"></textarea>
+            <textarea id="chat-input" placeholder="Ask Copilot anything\u2026" rows="1" autocomplete="off"></textarea>
             <button class="chat-send-btn" id="chat-send-btn" onclick="sendChatMessage()" disabled>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
             </button>
@@ -720,16 +711,14 @@ pages.vscode = async (el) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (textarea.value.trim()) sendChatMessage(); }
   });
 
-  if (meta.available) startScreenPolling();
   connectChatWs();
 };
 
-
 window.switchVscTab = function(tab) {
   vscodeTab = tab;
-  document.getElementById('vsc-panel-screen').style.display = tab === 'screen' ? '' : 'none';
+  document.getElementById('vsc-panel-workspace').style.display = tab === 'workspace' ? '' : 'none';
   document.getElementById('vsc-panel-chat').style.display = tab === 'chat' ? '' : 'none';
-  document.getElementById('vsc-tab-screen').classList.toggle('active', tab === 'screen');
+  document.getElementById('vsc-tab-workspace').classList.toggle('active', tab === 'workspace');
   document.getElementById('vsc-tab-chat').classList.toggle('active', tab === 'chat');
   if (tab === 'chat') {
     const msgs = document.getElementById('chat-messages');
@@ -737,52 +726,6 @@ window.switchVscTab = function(tab) {
     const input = document.getElementById('chat-input');
     if (input) input.focus();
   }
-};
-
-function startScreenPolling() {
-  if (screenInterval) clearInterval(screenInterval);
-  screenStreamActive = true;
-  const refresh = async () => {
-    const img = document.getElementById('screen-img');
-    if (!img || !screenStreamActive || state.page !== 'vscode') {
-      clearInterval(screenInterval); screenInterval = null; return;
-    }
-    try {
-      const res = await fetch('/api/vscode/screenshot?t=' + Date.now(), {
-        headers: { 'Authorization': 'Bearer ' + state.token }
-      });
-      if (!res.ok) return;
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      if (img._blobUrl) URL.revokeObjectURL(img._blobUrl);
-      img._blobUrl = url;
-      img.src = url;
-      const age = parseInt(res.headers.get('X-Screenshot-Age') || '0');
-      const ageEl = document.getElementById('screen-age');
-      const statusEl = document.getElementById('screen-status');
-      if (ageEl) ageEl.textContent = `${(blob.size / 1024).toFixed(0)} KB \u2022 ${(age / 1000).toFixed(0)}s ago`;
-      if (statusEl) {
-        statusEl.className = 'badge ' + (age < 10000 ? 'badge-green' : 'badge-yellow');
-        statusEl.textContent = age < 10000 ? '\u25CF LIVE' : '\u25CF STALE';
-      }
-    } catch {}
-  };
-  refresh();
-  screenInterval = setInterval(refresh, 2500);
-}
-
-window.toggleScreenStream = function() {
-  screenStreamActive = !screenStreamActive;
-  const btn = document.getElementById('screen-toggle');
-  if (btn) btn.innerHTML = screenStreamActive ? '\u23F8' : '\u25B6';
-  if (screenStreamActive) startScreenPolling();
-};
-
-window.screenFullscreen = function() {
-  const container = document.getElementById('screen-container');
-  if (!container) return;
-  if (container.requestFullscreen) container.requestFullscreen();
-  else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
 };
 
 window.toggleChatContext = function() {
@@ -813,6 +756,7 @@ function handleChatWsMessage(msg) {
   switch (msg.type) {
     case 'init':
       updateExtensionStatus(msg.connected);
+      updateWorkspacePanel(msg.workspace);
       updateWorkspaceInfo(msg.workspace);
       renderChatMessages(msg.messages || []);
       break;
@@ -820,6 +764,7 @@ function handleChatWsMessage(msg) {
       updateExtensionStatus(msg.connected);
       break;
     case 'workspace-state':
+      updateWorkspacePanel(msg.workspace);
       updateWorkspaceInfo(msg.workspace);
       break;
     case 'chat-message':
@@ -830,7 +775,7 @@ function handleChatWsMessage(msg) {
         chatStreamingId = null; chatStreamingText = '';
         enableChatInput(true);
       }
-      if (vscodeTab === 'screen') {
+      if (vscodeTab === 'workspace') {
         const tab = document.getElementById('vsc-tab-chat');
         if (tab) { tab.classList.add('tab-pulse'); setTimeout(() => tab.classList.remove('tab-pulse'), 2000); }
       }
@@ -851,6 +796,64 @@ function updateExtensionStatus(connected) {
     dot.className = 'chat-status-dot ' + (connected ? 'online' : 'offline');
     dot.title = connected ? 'Extension connected' : 'Extension disconnected';
   }
+}
+
+function updateWorkspacePanel(ws) {
+  const container = document.getElementById('ws-info');
+  if (!container) return;
+  if (!ws || !ws.workspace) {
+    container.innerHTML = '<div class="ws-empty" id="ws-empty"><div style="font-size:2rem;margin-bottom:.5rem">\u23F3</div><p>Waiting for VS Code\u2026</p><p class="ws-empty-sub">Install the Project Saver extension and connect</p></div>';
+    return;
+  }
+
+  const fileIcon = (name) => {
+    if (!name) return '\uD83D\uDCC4';
+    const ext = name.split('.').pop().toLowerCase();
+    const icons = { js: '\uD83D\uDFE8', ts: '\uD83D\uDD35', jsx: '\u269B\uFE0F', tsx: '\u269B\uFE0F', json: '\uD83D\uDCCB', md: '\uD83D\uDCD6', css: '\uD83C\uDFA8', html: '\uD83C\uDF10', py: '\uD83D\uDC0D', sh: '\u26A1', yml: '\u2699\uFE0F', yaml: '\u2699\uFE0F' };
+    return icons[ext] || '\uD83D\uDCC4';
+  };
+
+  const langBadge = ws.activeLanguage ? `<span class="badge badge-blue" style="font-size:.72rem">${esc(ws.activeLanguage)}</span>` : '';
+  const dirtyBadge = ws.dirty ? '<span class="badge badge-yellow" style="font-size:.72rem">\u270F\uFE0F Unsaved</span>' : '';
+  const lineInfo = ws.activeLine != null ? `<span style="font-size:.78rem;color:var(--text2)">Line ${ws.activeLine + 1}</span>` : '';
+  const ago = ws.timestamp ? `<span style="font-size:.72rem;color:var(--text2)">${new Date(ws.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>` : '';
+
+  let openFilesHtml = '';
+  if (ws.openFiles && ws.openFiles.length > 0) {
+    openFilesHtml = ws.openFiles.map(f => {
+      const isActive = f === ws.activeFile;
+      return `<div class="ws-file ${isActive ? 'ws-file-active' : ''}">${fileIcon(f)} <span>${esc(f)}</span></div>`;
+    }).join('');
+  } else {
+    openFilesHtml = '<div class="ws-file" style="color:var(--text2)">No files open</div>';
+  }
+
+  container.innerHTML = `
+    <div class="ws-project-card">
+      <div class="ws-project-header">
+        <div class="ws-project-icon">\uD83D\uDCC1</div>
+        <div class="ws-project-meta">
+          <div class="ws-project-name">${esc(ws.workspace)}</div>
+          <div class="ws-project-path">${ws.workspacePath ? esc(ws.workspacePath) : ''}</div>
+        </div>
+        ${ago}
+      </div>
+    </div>
+
+    ${ws.activeFile ? `
+    <div class="ws-section">
+      <div class="ws-section-title">\uD83D\uDCDD Active File</div>
+      <div class="ws-active-file">
+        <div class="ws-active-name">${fileIcon(ws.activeFile)} ${esc(ws.activeFile)}</div>
+        <div class="ws-active-meta">${langBadge} ${dirtyBadge} ${lineInfo}</div>
+      </div>
+    </div>` : ''}
+
+    <div class="ws-section">
+      <div class="ws-section-title">\uD83D\uDCC2 Open Tabs <span class="badge" style="font-size:.7rem">${(ws.openFiles || []).length}</span></div>
+      <div class="ws-file-list">${openFilesHtml}</div>
+    </div>
+  `;
 }
 
 function updateWorkspaceInfo(ws) {
@@ -934,7 +937,7 @@ function handleChatStream(msg) {
   const t = streamEl.querySelector('.chat-typing-indicator');
   if (t && chatStreamingText.length > 0) t.style.display = 'none';
   container.scrollTop = container.scrollHeight;
-  if (vscodeTab === 'screen') switchVscTab('chat');
+  if (vscodeTab === 'workspace') switchVscTab('chat');
 }
 
 function renderMarkdown(text) {
@@ -986,12 +989,12 @@ window.clearChatHistory = async function() {
 const origNavigate = navigate;
 navigate = function(page) {
   if (page !== 'vscode') {
-    if (screenInterval) { clearInterval(screenInterval); screenInterval = null; }
     if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
     if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
   }
   origNavigate(page);
 };
+
 
 pages.settings = async (el) => {
   let sysInfo;
