@@ -636,64 +636,136 @@ window.loadNexusDB = async function() {
 };
 
 // ── Page: VS Code ────────────────────────────────────────
+let screenInterval = null;
+
 pages.vscode = async (el) => {
-  let settings;
-  try {
-    settings = await api('/vscode/settings');
-  } catch {
-    settings = { tunnelUrl: '', machineName: '', autoConnect: 'false' };
-  }
+  // Clear any previous polling
+  if (screenInterval) { clearInterval(screenInterval); screenInterval = null; }
+
+  let meta;
+  try { meta = await api('/vscode/screenshot/meta'); } catch { meta = { available: false }; }
 
   el.innerHTML = `
     <div class="page-header">
-      <h2>VS Code Remote</h2>
-      <div class="breadcrumb">Access your VS Code workspace from anywhere</div>
+      <h2>VS Code — Live View</h2>
+      <div class="breadcrumb">Real-time screen capture from your PC</div>
     </div>
 
-    ${settings.tunnelUrl ? `
-      <div class="card" style="margin-bottom:1rem">
-        <div class="card-title">VS Code Workspace</div>
-        <iframe src="${esc(settings.tunnelUrl)}" class="vscode-frame" id="vscode-iframe" allow="clipboard-read; clipboard-write"></iframe>
-      </div>
-    ` : ''}
-
-    <div class="card" style="margin-bottom:1rem">
-      <div class="card-title">Tunnel Configuration</div>
-      <div class="field" style="margin-bottom:.8rem">
-        <label style="display:block;margin-bottom:.3rem;color:var(--text2);font-size:.85rem">Tunnel URL</label>
-        <input type="url" id="vscode-tunnel-url" value="${esc(settings.tunnelUrl)}" placeholder="https://vscode.dev/tunnel/your-machine/path">
-      </div>
-      <div class="field" style="margin-bottom:.8rem">
-        <label style="display:block;margin-bottom:.3rem;color:var(--text2);font-size:.85rem">Machine Name</label>
-        <input type="text" id="vscode-machine-name" value="${esc(settings.machineName)}" placeholder="my-dev-pc">
-      </div>
-      <div class="btn-group">
-        <button class="btn btn-accent" onclick="saveVSCodeSettings()">Save Settings</button>
-        ${settings.tunnelUrl ? `<button class="btn" onclick="window.open('${esc(settings.tunnelUrl)}','_blank')">Open in New Tab</button>` : ''}
+    <div class="card" style="margin-bottom:1rem;padding:.6rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
+        <div style="display:flex;align-items:center;gap:.6rem">
+          <span id="screen-status" class="badge ${meta.available ? 'badge-green' : 'badge-red'}">${meta.available ? '● LIVE' : '● OFFLINE'}</span>
+          <span id="screen-age" style="font-size:.82rem;color:var(--text2)"></span>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-sm ${meta.available ? 'btn-danger' : 'btn-success'}" id="screen-toggle" onclick="toggleScreenStream()">
+            ${meta.available ? '⏸ Pause' : '▶ Start'}
+          </button>
+          <button class="btn btn-sm" onclick="screenFullscreen()">⛶ Fullscreen</button>
+        </div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-title">Setup Guide</div>
+    <div id="screen-container" style="position:relative;background:#1e1e1e;border-radius:var(--radius);overflow:hidden;border:1px solid var(--border)">
+      ${meta.available
+        ? '<img id="screen-img" src="/api/vscode/screenshot" style="width:100%;display:block;cursor:zoom-in" onclick="screenFullscreen()">'
+        : `<div class="empty-state" id="screen-empty" style="padding:4rem 1rem">
+            <div class="empty-icon">🖥️</div>
+            <p style="margin-bottom:.5rem">Screen agent not connected</p>
+            <p style="font-size:.85rem;color:var(--text2);max-width:400px;margin:0 auto">
+              Run the screen agent on your PC to start streaming:<br>
+              <code style="background:var(--bg);padding:.2rem .5rem;border-radius:4px;margin-top:.4rem;display:inline-block">node screen-agent.js</code>
+            </p>
+          </div>`
+      }
+    </div>
+
+    <div class="card" style="margin-top:1rem">
+      <div class="card-title">Screen Agent Setup</div>
       <div style="font-size:.9rem;line-height:1.7;color:var(--text2)">
-        <p><strong style="color:var(--text)">1. Install VS Code CLI</strong> on your development PC</p>
-        <p style="margin-top:.5rem"><strong style="color:var(--text)">2. Start a tunnel:</strong></p>
-        <div class="log-view" style="margin:.5rem 0;max-height:60px">code tunnel --name my-dev-pc</div>
-        <p style="margin-top:.5rem"><strong style="color:var(--text)">3. Authenticate</strong> with GitHub when prompted</p>
-        <p style="margin-top:.5rem"><strong style="color:var(--text)">4. Copy the tunnel URL</strong> and paste it above</p>
-        <p style="margin-top:.8rem">Once configured, you can access your full VS Code workspace — including Copilot Chat — directly from your phone or any browser.</p>
+        <p>The screen agent captures your PC's screen and streams it here. Run it from the ProjectSaver folder:</p>
+        <div class="log-view" style="margin:.5rem 0;max-height:80px;font-size:.82rem">cd c:\\VsCodeProjects\\ProjectSaver
+node screen-agent.js</div>
+        <p style="margin-top:.5rem">Options (environment variables):</p>
+        <div class="log-view" style="margin:.5rem 0;max-height:100px;font-size:.82rem">PS_INTERVAL=2000    # ms between captures (default: 2000)
+PS_QUALITY=50       # JPEG quality 1-100 (default: 50)
+PS_WIDTH=1280       # max width in px (default: 1280)</div>
       </div>
     </div>
   `;
+
+  // Start live polling if available
+  if (meta.available) startScreenPolling();
+};
+
+let screenStreamActive = true;
+
+function startScreenPolling() {
+  if (screenInterval) clearInterval(screenInterval);
+  screenStreamActive = true;
+
+  const refresh = () => {
+    const img = document.getElementById('screen-img');
+    if (!img || !screenStreamActive || state.page !== 'vscode') {
+      clearInterval(screenInterval);
+      screenInterval = null;
+      return;
+    }
+    // Append timestamp to bust cache
+    img.src = '/api/vscode/screenshot?t=' + Date.now();
+
+    // Update age indicator
+    api('/vscode/screenshot/meta').then(m => {
+      const ageEl = document.getElementById('screen-age');
+      const statusEl = document.getElementById('screen-status');
+      if (ageEl && m.available) {
+        const sec = (m.age / 1000).toFixed(0);
+        ageEl.textContent = `${(m.size / 1024).toFixed(0)} KB • ${sec}s ago`;
+        if (statusEl) {
+          statusEl.className = 'badge ' + (m.age < 10000 ? 'badge-green' : 'badge-yellow');
+          statusEl.textContent = m.age < 10000 ? '● LIVE' : '● STALE';
+        }
+      }
+    }).catch(() => {});
+  };
+
+  refresh();
+  screenInterval = setInterval(refresh, 2500);
+}
+
+window.toggleScreenStream = function() {
+  screenStreamActive = !screenStreamActive;
+  const btn = document.getElementById('screen-toggle');
+  if (btn) {
+    btn.className = `btn btn-sm ${screenStreamActive ? 'btn-danger' : 'btn-success'}`;
+    btn.innerHTML = screenStreamActive ? '⏸ Pause' : '▶ Resume';
+  }
+  if (screenStreamActive) startScreenPolling();
+};
+
+window.screenFullscreen = function() {
+  const container = document.getElementById('screen-container');
+  if (!container) return;
+  if (container.requestFullscreen) container.requestFullscreen();
+  else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
+};
+
+// Clean up polling when navigating away
+const origNavigate = navigate;
+navigate = function(page) {
+  if (page !== 'vscode' && screenInterval) {
+    clearInterval(screenInterval);
+    screenInterval = null;
+  }
+  origNavigate(page);
 };
 
 window.saveVSCodeSettings = async function() {
   try {
-    const tunnelUrl = document.getElementById('vscode-tunnel-url').value.trim();
-    const machineName = document.getElementById('vscode-machine-name').value.trim();
+    const tunnelUrl = document.getElementById('vscode-tunnel-url')?.value.trim() || '';
+    const machineName = document.getElementById('vscode-machine-name')?.value.trim() || '';
     await api('/vscode/settings', { method: 'PUT', body: { tunnelUrl, machineName } });
     toast('VS Code settings saved', 'success');
-    setTimeout(() => navigate('vscode'), 500);
   } catch (err) {
     toast(err.message, 'error');
   }

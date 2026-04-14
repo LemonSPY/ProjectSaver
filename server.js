@@ -389,6 +389,46 @@ app.put('/api/vscode/settings', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── VS Code screen capture ─────────────────────────────────
+let latestScreenshot = null;  // { buffer, timestamp }
+const MAX_SCREENSHOT_SIZE = 5 * 1024 * 1024; // 5MB limit
+
+app.post('/api/vscode/screenshot', requireAuth, (req, res) => {
+  const chunks = [];
+  let size = 0;
+  req.on('data', chunk => {
+    size += chunk.length;
+    if (size <= MAX_SCREENSHOT_SIZE) chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (size > MAX_SCREENSHOT_SIZE) return res.status(413).json({ error: 'Too large' });
+    latestScreenshot = { buffer: Buffer.concat(chunks), timestamp: Date.now() };
+    res.json({ ok: true, size });
+  });
+});
+
+app.get('/api/vscode/screenshot', requireAuth, (_req, res) => {
+  if (!latestScreenshot) return res.status(404).json({ error: 'No screenshot available' });
+  const age = Date.now() - latestScreenshot.timestamp;
+  res.set({
+    'Content-Type': 'image/jpeg',
+    'Cache-Control': 'no-cache',
+    'X-Screenshot-Age': String(age),
+    'X-Screenshot-Time': new Date(latestScreenshot.timestamp).toISOString(),
+  });
+  res.send(latestScreenshot.buffer);
+});
+
+app.get('/api/vscode/screenshot/meta', requireAuth, (_req, res) => {
+  if (!latestScreenshot) return res.json({ available: false });
+  res.json({
+    available: true,
+    timestamp: latestScreenshot.timestamp,
+    age: Date.now() - latestScreenshot.timestamp,
+    size: latestScreenshot.buffer.length,
+  });
+});
+
 // ── General settings ────────────────────────────────────────
 app.get('/api/settings', requireAuth, (_req, res) => {
   const all = db.prepare('SELECT key, value FROM settings').all();
