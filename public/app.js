@@ -668,7 +668,7 @@ pages.vscode = async (el) => {
 
     <div id="screen-container" style="position:relative;background:#1e1e1e;border-radius:var(--radius);overflow:hidden;border:1px solid var(--border)">
       ${meta.available
-        ? '<img id="screen-img" src="/api/vscode/screenshot" style="width:100%;display:block;cursor:zoom-in" onclick="screenFullscreen()">'
+        ? '<img id="screen-img" style="width:100%;display:block;cursor:zoom-in" onclick="screenFullscreen()">'
         : `<div class="empty-state" id="screen-empty" style="padding:4rem 1rem">
             <div class="empty-icon">🖥️</div>
             <p style="margin-bottom:.5rem">Screen agent not connected</p>
@@ -704,29 +704,41 @@ function startScreenPolling() {
   if (screenInterval) clearInterval(screenInterval);
   screenStreamActive = true;
 
-  const refresh = () => {
+  const refresh = async () => {
     const img = document.getElementById('screen-img');
     if (!img || !screenStreamActive || state.page !== 'vscode') {
       clearInterval(screenInterval);
       screenInterval = null;
       return;
     }
-    // Append timestamp to bust cache
-    img.src = '/api/vscode/screenshot?t=' + Date.now();
 
-    // Update age indicator
-    api('/vscode/screenshot/meta').then(m => {
+    try {
+      // Fetch image with auth header
+      const res = await fetch('/api/vscode/screenshot?t=' + Date.now(), {
+        headers: { 'Authorization': 'Bearer ' + state.token }
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      // Revoke old blob URL to prevent memory leak
+      if (img._blobUrl) URL.revokeObjectURL(img._blobUrl);
+      img._blobUrl = url;
+      img.src = url;
+
+      // Update age indicator from headers
+      const age = parseInt(res.headers.get('X-Screenshot-Age') || '0');
+      const size = blob.size;
       const ageEl = document.getElementById('screen-age');
       const statusEl = document.getElementById('screen-status');
-      if (ageEl && m.available) {
-        const sec = (m.age / 1000).toFixed(0);
-        ageEl.textContent = `${(m.size / 1024).toFixed(0)} KB • ${sec}s ago`;
-        if (statusEl) {
-          statusEl.className = 'badge ' + (m.age < 10000 ? 'badge-green' : 'badge-yellow');
-          statusEl.textContent = m.age < 10000 ? '● LIVE' : '● STALE';
-        }
+      if (ageEl) {
+        const sec = (age / 1000).toFixed(0);
+        ageEl.textContent = `${(size / 1024).toFixed(0)} KB • ${sec}s ago`;
       }
-    }).catch(() => {});
+      if (statusEl) {
+        statusEl.className = 'badge ' + (age < 10000 ? 'badge-green' : 'badge-yellow');
+        statusEl.textContent = age < 10000 ? '● LIVE' : '● STALE';
+      }
+    } catch { /* ignore fetch errors */ }
   };
 
   refresh();
