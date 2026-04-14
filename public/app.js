@@ -635,112 +635,138 @@ window.loadNexusDB = async function() {
   }
 };
 
-// ── Page: VS Code ────────────────────────────────────────
+// ── Page: VS Code (combined screen + chat) ──────────────
 let screenInterval = null;
+let screenStreamActive = true;
+let chatWs = null;
+let chatWsReconnect = null;
+let chatStreamingId = null;
+let chatStreamingText = '';
+let chatIncludeContext = true;
+let vscodeTab = 'screen';
 
 pages.vscode = async (el) => {
-  // Clear any previous polling
   if (screenInterval) { clearInterval(screenInterval); screenInterval = null; }
+  if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
+  if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
 
   let meta;
   try { meta = await api('/vscode/screenshot/meta'); } catch { meta = { available: false }; }
 
   el.innerHTML = `
-    <div class="page-header">
-      <h2>VS Code — Live View</h2>
-      <div class="breadcrumb">Real-time screen capture from your PC</div>
-    </div>
-
-    <div class="card" style="margin-bottom:1rem;padding:.6rem">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
-        <div style="display:flex;align-items:center;gap:.6rem">
-          <span id="screen-status" class="badge ${meta.available ? 'badge-green' : 'badge-red'}">${meta.available ? '● LIVE' : '● OFFLINE'}</span>
-          <span id="screen-age" style="font-size:.82rem;color:var(--text2)"></span>
+    <div class="vsc-page">
+      <div class="vsc-topbar">
+        <div class="vsc-topbar-left">
+          <div class="chat-status-dot" id="chat-ext-dot" title="Extension status"></div>
+          <div class="vsc-topbar-info">
+            <div class="vsc-topbar-title" id="chat-title">VS Code</div>
+            <div class="vsc-topbar-sub" id="chat-subtitle">Connecting…</div>
+          </div>
         </div>
-        <div class="btn-group">
-          <button class="btn btn-sm ${meta.available ? 'btn-danger' : 'btn-success'}" id="screen-toggle" onclick="toggleScreenStream()">
-            ${meta.available ? '⏸ Pause' : '▶ Start'}
-          </button>
-          <button class="btn btn-sm" onclick="screenFullscreen()">⛶ Fullscreen</button>
+        <div class="vsc-tabs">
+          <button class="vsc-tab active" id="vsc-tab-screen" onclick="switchVscTab('screen')">🖥️ Screen</button>
+          <button class="vsc-tab" id="vsc-tab-chat" onclick="switchVscTab('chat')">💬 Chat</button>
         </div>
       </div>
-    </div>
-
-    <div id="screen-container" style="position:relative;background:#1e1e1e;border-radius:var(--radius);overflow:hidden;border:1px solid var(--border)">
-      ${meta.available
-        ? '<img id="screen-img" style="width:100%;display:block;cursor:zoom-in" onclick="screenFullscreen()">'
-        : `<div class="empty-state" id="screen-empty" style="padding:4rem 1rem">
-            <div class="empty-icon">🖥️</div>
-            <p style="margin-bottom:.5rem">Screen agent not connected</p>
-            <p style="font-size:.85rem;color:var(--text2);max-width:400px;margin:0 auto">
-              Run the screen agent on your PC to start streaming:<br>
-              <code style="background:var(--bg);padding:.2rem .5rem;border-radius:4px;margin-top:.4rem;display:inline-block">node screen-agent.js</code>
-            </p>
-          </div>`
-      }
-    </div>
-
-    <div class="card" style="margin-top:1rem">
-      <div class="card-title">Screen Agent Setup</div>
-      <div style="font-size:.9rem;line-height:1.7;color:var(--text2)">
-        <p>The screen agent captures your PC's screen and streams it here. Run it from the ProjectSaver folder:</p>
-        <div class="log-view" style="margin:.5rem 0;max-height:80px;font-size:.82rem">cd c:\\VsCodeProjects\\ProjectSaver
-node screen-agent.js</div>
-        <p style="margin-top:.5rem">Options (environment variables):</p>
-        <div class="log-view" style="margin:.5rem 0;max-height:100px;font-size:.82rem">PS_INTERVAL=2000    # ms between captures (default: 2000)
-PS_QUALITY=50       # JPEG quality 1-100 (default: 50)
-PS_WIDTH=1280       # max width in px (default: 1280)</div>
+      <div class="vsc-panel vsc-panel-screen" id="vsc-panel-screen">
+        <div class="vsc-screen-bar">
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <span id="screen-status" class="badge ${meta.available ? 'badge-green' : 'badge-red'}">${meta.available ? '● LIVE' : '● OFFLINE'}</span>
+            <span id="screen-age" style="font-size:.78rem;color:var(--text2)"></span>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-sm" id="screen-toggle" onclick="toggleScreenStream()">⏸</button>
+            <button class="btn btn-sm" onclick="screenFullscreen()">⛶</button>
+          </div>
+        </div>
+        <div id="screen-container" class="vsc-screen-container">
+          ${meta.available
+            ? '<img id="screen-img" style="width:100%;display:block;cursor:zoom-in" onclick="screenFullscreen()">'
+            : '<div class="empty-state" style="padding:3rem 1rem"><div class="empty-icon">🖥️</div><p>Screen agent offline</p><p style="font-size:.82rem;color:var(--text2);margin-top:.3rem">Run <code style="background:var(--bg);padding:.15rem .4rem;border-radius:3px">node screen-agent.js</code> on your PC</p></div>'}
+        </div>
+      </div>
+      <div class="vsc-panel vsc-panel-chat" id="vsc-panel-chat" style="display:none">
+        <div class="vsc-chat-actions">
+          <button class="btn btn-sm" id="chat-ctx-toggle" onclick="toggleChatContext()">📎 Context</button>
+          <div class="chat-workspace-badge" id="chat-workspace-badge"></div>
+          <button class="btn btn-sm btn-danger" onclick="clearChatHistory()" style="margin-left:auto">🗑️</button>
+        </div>
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-empty" id="chat-empty">
+            <div style="font-size:2rem;margin-bottom:.4rem">💬</div>
+            <p>Chat with Copilot</p>
+            <p class="chat-empty-sub">Type below to talk to the AI agent in VS Code</p>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <div class="chat-input-row">
+            <textarea id="chat-input" placeholder="Ask Copilot anything…" rows="1" autocomplete="off"></textarea>
+            <button class="chat-send-btn" id="chat-send-btn" onclick="sendChatMessage()" disabled>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   `;
 
-  // Start live polling if available
+  const textarea = document.getElementById('chat-input');
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+    document.getElementById('chat-send-btn').disabled = !textarea.value.trim();
+  });
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (textarea.value.trim()) sendChatMessage(); }
+  });
+
   if (meta.available) startScreenPolling();
+  connectChatWs();
 };
 
-let screenStreamActive = true;
+
+window.switchVscTab = function(tab) {
+  vscodeTab = tab;
+  document.getElementById('vsc-panel-screen').style.display = tab === 'screen' ? '' : 'none';
+  document.getElementById('vsc-panel-chat').style.display = tab === 'chat' ? '' : 'none';
+  document.getElementById('vsc-tab-screen').classList.toggle('active', tab === 'screen');
+  document.getElementById('vsc-tab-chat').classList.toggle('active', tab === 'chat');
+  if (tab === 'chat') {
+    const msgs = document.getElementById('chat-messages');
+    if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    const input = document.getElementById('chat-input');
+    if (input) input.focus();
+  }
+};
 
 function startScreenPolling() {
   if (screenInterval) clearInterval(screenInterval);
   screenStreamActive = true;
-
   const refresh = async () => {
     const img = document.getElementById('screen-img');
     if (!img || !screenStreamActive || state.page !== 'vscode') {
-      clearInterval(screenInterval);
-      screenInterval = null;
-      return;
+      clearInterval(screenInterval); screenInterval = null; return;
     }
-
     try {
-      // Fetch image with auth header
       const res = await fetch('/api/vscode/screenshot?t=' + Date.now(), {
         headers: { 'Authorization': 'Bearer ' + state.token }
       });
       if (!res.ok) return;
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      // Revoke old blob URL to prevent memory leak
       if (img._blobUrl) URL.revokeObjectURL(img._blobUrl);
       img._blobUrl = url;
       img.src = url;
-
-      // Update age indicator from headers
       const age = parseInt(res.headers.get('X-Screenshot-Age') || '0');
-      const size = blob.size;
       const ageEl = document.getElementById('screen-age');
       const statusEl = document.getElementById('screen-status');
-      if (ageEl) {
-        const sec = (age / 1000).toFixed(0);
-        ageEl.textContent = `${(size / 1024).toFixed(0)} KB • ${sec}s ago`;
-      }
+      if (ageEl) ageEl.textContent = `${(blob.size / 1024).toFixed(0)} KB \u2022 ${(age / 1000).toFixed(0)}s ago`;
       if (statusEl) {
         statusEl.className = 'badge ' + (age < 10000 ? 'badge-green' : 'badge-yellow');
-        statusEl.textContent = age < 10000 ? '● LIVE' : '● STALE';
+        statusEl.textContent = age < 10000 ? '\u25CF LIVE' : '\u25CF STALE';
       }
-    } catch { /* ignore fetch errors */ }
+    } catch {}
   };
-
   refresh();
   screenInterval = setInterval(refresh, 2500);
 }
@@ -748,10 +774,7 @@ function startScreenPolling() {
 window.toggleScreenStream = function() {
   screenStreamActive = !screenStreamActive;
   const btn = document.getElementById('screen-toggle');
-  if (btn) {
-    btn.className = `btn btn-sm ${screenStreamActive ? 'btn-danger' : 'btn-success'}`;
-    btn.innerHTML = screenStreamActive ? '⏸ Pause' : '▶ Resume';
-  }
+  if (btn) btn.innerHTML = screenStreamActive ? '\u23F8' : '\u25B6';
   if (screenStreamActive) startScreenPolling();
 };
 
@@ -762,136 +785,27 @@ window.screenFullscreen = function() {
   else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
 };
 
-// Clean up polling when navigating away
-const origNavigate = navigate;
-navigate = function(page) {
-  if (page !== 'vscode' && screenInterval) {
-    clearInterval(screenInterval);
-    screenInterval = null;
-  }
-  // Clean up chat WS when leaving chat
-  if (page !== 'chat') {
-    if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
-    if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
-  }
-  origNavigate(page);
-};
-
-window.saveVSCodeSettings = async function() {
-  try {
-    const tunnelUrl = document.getElementById('vscode-tunnel-url')?.value.trim() || '';
-    const machineName = document.getElementById('vscode-machine-name')?.value.trim() || '';
-    await api('/vscode/settings', { method: 'PUT', body: { tunnelUrl, machineName } });
-    toast('VS Code settings saved', 'success');
-  } catch (err) {
-    toast(err.message, 'error');
-  }
-};
-
-// ── Page: Chat ───────────────────────────────────────────
-let chatWs = null;
-let chatWsReconnect = null;
-let chatStreamingId = null;
-let chatStreamingText = '';
-let chatIncludeContext = true;
-
-pages.chat = async (el) => {
-  // Disconnect previous WS
-  if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
-  if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
-
-  el.innerHTML = `
-    <div class="chat-page">
-      <div class="chat-header" id="chat-header">
-        <div class="chat-header-left">
-          <div class="chat-status-dot" id="chat-ext-dot"></div>
-          <div>
-            <div class="chat-title" id="chat-title">Copilot Chat</div>
-            <div class="chat-subtitle" id="chat-subtitle">Connecting…</div>
-          </div>
-        </div>
-        <div class="chat-header-right">
-          <button class="btn btn-sm" id="chat-ctx-toggle" onclick="toggleChatContext()" title="Include workspace context">📎 Context</button>
-          <button class="btn btn-sm btn-danger" onclick="clearChatHistory()" title="Clear history">🗑️</button>
-        </div>
-      </div>
-
-      <div class="chat-messages" id="chat-messages">
-        <div class="chat-empty" id="chat-empty">
-          <div style="font-size:2.5rem;margin-bottom:.6rem">💬</div>
-          <p>Chat with Copilot through VS Code</p>
-          <p class="chat-empty-sub">Messages are sent to Copilot via your VS Code extension bridge</p>
-        </div>
-      </div>
-
-      <div class="chat-input-bar" id="chat-input-bar">
-        <div class="chat-workspace-badge" id="chat-workspace-badge" style="display:none"></div>
-        <div class="chat-input-row">
-          <textarea id="chat-input" placeholder="Ask Copilot anything…" rows="1"
-            autocomplete="off" autocorrect="on" spellcheck="true"></textarea>
-          <button class="chat-send-btn" id="chat-send-btn" onclick="sendChatMessage()" disabled>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Auto-resize textarea
-  const textarea = document.getElementById('chat-input');
-  textarea.addEventListener('input', () => {
-    textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
-    document.getElementById('chat-send-btn').disabled = !textarea.value.trim();
-  });
-  textarea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      if (textarea.value.trim()) sendChatMessage();
-    }
-  });
-
-  // Connect WebSocket
-  connectChatWs();
-};
-
 window.toggleChatContext = function() {
   chatIncludeContext = !chatIncludeContext;
   const btn = document.getElementById('chat-ctx-toggle');
   if (btn) {
     btn.className = `btn btn-sm ${chatIncludeContext ? '' : 'btn-danger'}`;
-    btn.innerHTML = chatIncludeContext ? '📎 Context' : '📎 No Context';
+    btn.innerHTML = chatIncludeContext ? '\uD83D\uDCCE Context' : '\uD83D\uDCCE No Ctx';
   }
-  toast(chatIncludeContext ? 'Workspace context included' : 'Context disabled', 'info');
+  toast(chatIncludeContext ? 'Context included' : 'Context disabled', 'info');
 };
 
 function connectChatWs() {
   if (!state.token) return;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${proto}//${location.host}/ws/chat?token=${encodeURIComponent(state.token)}`;
-
   chatWs = new WebSocket(wsUrl);
-
-  chatWs.onopen = () => {
-    updateChatHeader(null, 'Connected');
-  };
-
-  chatWs.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data);
-      handleChatWsMessage(msg);
-    } catch {}
-  };
-
+  chatWs.onopen = () => updateChatHeader(null, 'Connected');
+  chatWs.onmessage = (e) => { try { handleChatWsMessage(JSON.parse(e.data)); } catch {} };
   chatWs.onclose = () => {
-    updateChatHeader(false, 'Reconnecting…');
-    if (state.page === 'chat') {
-      chatWsReconnect = setTimeout(connectChatWs, 3000);
-    }
+    updateChatHeader(false, 'Reconnecting\u2026');
+    if (state.page === 'vscode') chatWsReconnect = setTimeout(connectChatWs, 3000);
   };
-
   chatWs.onerror = () => {};
 }
 
@@ -902,41 +816,31 @@ function handleChatWsMessage(msg) {
       updateWorkspaceInfo(msg.workspace);
       renderChatMessages(msg.messages || []);
       break;
-
     case 'extension-status':
       updateExtensionStatus(msg.connected);
       break;
-
     case 'workspace-state':
       updateWorkspaceInfo(msg.workspace);
       break;
-
     case 'chat-message':
       appendChatMessage(msg.message);
-      // If we were streaming this ID, stop
       if (msg.message.role === 'assistant' && chatStreamingId) {
         const streamEl = document.getElementById('chat-streaming');
         if (streamEl) streamEl.remove();
-        chatStreamingId = null;
-        chatStreamingText = '';
+        chatStreamingId = null; chatStreamingText = '';
         enableChatInput(true);
       }
+      if (vscodeTab === 'screen') {
+        const tab = document.getElementById('vsc-tab-chat');
+        if (tab) { tab.classList.add('tab-pulse'); setTimeout(() => tab.classList.remove('tab-pulse'), 2000); }
+      }
       break;
-
     case 'chat-stream':
       handleChatStream(msg);
       break;
-
     case 'chat-clear':
-      const msgContainer = document.getElementById('chat-messages');
-      if (msgContainer) {
-        msgContainer.innerHTML = `
-          <div class="chat-empty" id="chat-empty">
-            <div style="font-size:2.5rem;margin-bottom:.6rem">💬</div>
-            <p>Chat with Copilot through VS Code</p>
-            <p class="chat-empty-sub">Messages are sent to Copilot via your VS Code extension bridge</p>
-          </div>`;
-      }
+      const mc = document.getElementById('chat-messages');
+      if (mc) mc.innerHTML = '<div class="chat-empty" id="chat-empty"><div style="font-size:2rem;margin-bottom:.4rem">\uD83D\uDCAC</div><p>Chat with Copilot</p><p class="chat-empty-sub">Type below to talk to the AI agent in VS Code</p></div>';
       break;
   }
 }
@@ -945,7 +849,7 @@ function updateExtensionStatus(connected) {
   const dot = document.getElementById('chat-ext-dot');
   if (dot) {
     dot.className = 'chat-status-dot ' + (connected ? 'online' : 'offline');
-    dot.title = connected ? 'VS Code extension connected' : 'VS Code extension disconnected';
+    dot.title = connected ? 'Extension connected' : 'Extension disconnected';
   }
 }
 
@@ -954,20 +858,14 @@ function updateWorkspaceInfo(ws) {
   const title = document.getElementById('chat-title');
   const subtitle = document.getElementById('chat-subtitle');
   const badge = document.getElementById('chat-workspace-badge');
-
-  if (title && ws.workspace) {
-    title.textContent = ws.workspace || 'Copilot Chat';
-  }
+  if (title && ws.workspace) title.textContent = ws.workspace || 'VS Code';
   if (subtitle) {
     const parts = [];
     if (ws.activeFile) parts.push(ws.activeFile);
     if (ws.activeLanguage) parts.push(ws.activeLanguage);
-    subtitle.textContent = parts.join(' • ') || 'No file open';
+    subtitle.textContent = parts.join(' \u2022 ') || 'No file open';
   }
-  if (badge && ws.activeFile) {
-    badge.style.display = '';
-    badge.innerHTML = `<span class="badge badge-blue" style="font-size:.72rem">📄 ${esc(ws.activeFile)}</span>`;
-  }
+  if (badge && ws.activeFile) badge.innerHTML = '<span class="badge badge-blue" style="font-size:.7rem">\uD83D\uDCC4 ' + esc(ws.activeFile) + '</span>';
 }
 
 function updateChatHeader(connected, statusText) {
@@ -978,16 +876,11 @@ function updateChatHeader(connected, statusText) {
 
 function renderChatMessages(messages) {
   const container = document.getElementById('chat-messages');
-  if (!container) return;
-  if (messages.length === 0) return;
-
+  if (!container || messages.length === 0) return;
   const empty = document.getElementById('chat-empty');
   if (empty) empty.style.display = 'none';
-
   const fragment = document.createDocumentFragment();
-  for (const msg of messages) {
-    fragment.appendChild(createChatBubble(msg));
-  }
+  for (const msg of messages) fragment.appendChild(createChatBubble(msg));
   container.appendChild(fragment);
   container.scrollTop = container.scrollHeight;
 }
@@ -995,38 +888,26 @@ function renderChatMessages(messages) {
 function appendChatMessage(msg) {
   const container = document.getElementById('chat-messages');
   if (!container) return;
-
   const empty = document.getElementById('chat-empty');
   if (empty) empty.style.display = 'none';
-
   container.appendChild(createChatBubble(msg));
   container.scrollTop = container.scrollHeight;
 }
 
 function createChatBubble(msg) {
   const div = document.createElement('div');
-  div.className = `chat-bubble chat-bubble-${msg.role}`;
-  div.setAttribute('data-id', msg.id || '');
-
+  div.className = 'chat-bubble chat-bubble-' + msg.role;
   const label = document.createElement('div');
   label.className = 'chat-bubble-label';
   label.textContent = msg.role === 'user' ? 'You' : 'Copilot';
-
   const content = document.createElement('div');
   content.className = 'chat-bubble-content';
-  if (msg.role === 'assistant') {
-    content.innerHTML = renderMarkdown(msg.text || '');
-  } else {
-    content.textContent = msg.text || '';
-  }
-
+  if (msg.role === 'assistant') content.innerHTML = renderMarkdown(msg.text || '');
+  else content.textContent = msg.text || '';
   const time = document.createElement('div');
   time.className = 'chat-bubble-time';
-  const d = new Date(msg.timestamp || Date.now());
-  time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
+  time.textContent = new Date(msg.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   if (msg.error) div.classList.add('chat-bubble-error');
-
   div.appendChild(label);
   div.appendChild(content);
   div.appendChild(time);
@@ -1036,53 +917,38 @@ function createChatBubble(msg) {
 function handleChatStream(msg) {
   const container = document.getElementById('chat-messages');
   if (!container) return;
-
   const empty = document.getElementById('chat-empty');
   if (empty) empty.style.display = 'none';
-
   chatStreamingId = msg.id;
   chatStreamingText = msg.partial || '';
-
   let streamEl = document.getElementById('chat-streaming');
   if (!streamEl) {
     streamEl = document.createElement('div');
     streamEl.id = 'chat-streaming';
     streamEl.className = 'chat-bubble chat-bubble-assistant chat-streaming';
-    streamEl.innerHTML = `
-      <div class="chat-bubble-label">Copilot</div>
-      <div class="chat-bubble-content"></div>
-      <div class="chat-typing-indicator"><span></span><span></span><span></span></div>`;
+    streamEl.innerHTML = '<div class="chat-bubble-label">Copilot</div><div class="chat-bubble-content"></div><div class="chat-typing-indicator"><span></span><span></span><span></span></div>';
     container.appendChild(streamEl);
   }
-
-  const content = streamEl.querySelector('.chat-bubble-content');
-  if (content) content.innerHTML = renderMarkdown(chatStreamingText);
-
-  const typing = streamEl.querySelector('.chat-typing-indicator');
-  if (typing && chatStreamingText.length > 0) typing.style.display = 'none';
-
+  const c = streamEl.querySelector('.chat-bubble-content');
+  if (c) c.innerHTML = renderMarkdown(chatStreamingText);
+  const t = streamEl.querySelector('.chat-typing-indicator');
+  if (t && chatStreamingText.length > 0) t.style.display = 'none';
   container.scrollTop = container.scrollHeight;
+  if (vscodeTab === 'screen') switchVscTab('chat');
 }
 
 function renderMarkdown(text) {
   if (!text) return '';
   let html = esc(text);
-  // Code blocks
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="chat-code"><code>$2</code></pre>');
-  // Inline code
   html = html.replace(/`([^`]+)`/g, '<code class="chat-inline-code">$1</code>');
-  // Bold
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // Italic
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  // Headings
   html = html.replace(/^### (.+)$/gm, '<strong style="font-size:1rem">$1</strong>');
   html = html.replace(/^## (.+)$/gm, '<strong style="font-size:1.05rem">$1</strong>');
   html = html.replace(/^# (.+)$/gm, '<strong style="font-size:1.1rem">$1</strong>');
-  // Bullets
-  html = html.replace(/^- (.+)$/gm, '• $1');
-  html = html.replace(/^\* (.+)$/gm, '• $1');
-  // Line breaks
+  html = html.replace(/^- (.+)$/gm, '\u2022 $1');
+  html = html.replace(/^\* (.+)$/gm, '\u2022 $1');
   html = html.replace(/\n/g, '<br>');
   return html;
 }
@@ -1099,16 +965,11 @@ window.sendChatMessage = async function() {
   if (!input) return;
   const text = input.value.trim();
   if (!text) return;
-
   input.value = '';
   input.style.height = 'auto';
   enableChatInput(false);
-
   try {
-    await api('/chat/send', {
-      method: 'POST',
-      body: { text, includeContext: chatIncludeContext },
-    });
+    await api('/chat/send', { method: 'POST', body: { text, includeContext: chatIncludeContext } });
   } catch (err) {
     toast('Chat error: ' + err.message, 'error');
     enableChatInput(true);
@@ -1117,13 +978,21 @@ window.sendChatMessage = async function() {
 
 window.clearChatHistory = async function() {
   if (!confirm('Clear all chat history?')) return;
-  try {
-    await api('/chat/history', { method: 'DELETE' });
-    toast('Chat cleared', 'success');
-  } catch (err) {
-    toast(err.message, 'error');
-  }
+  try { await api('/chat/history', { method: 'DELETE' }); toast('Chat cleared', 'success'); }
+  catch (err) { toast(err.message, 'error'); }
 };
+
+// Clean up when navigating away
+const origNavigate = navigate;
+navigate = function(page) {
+  if (page !== 'vscode') {
+    if (screenInterval) { clearInterval(screenInterval); screenInterval = null; }
+    if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
+    if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
+  }
+  origNavigate(page);
+};
+
 pages.settings = async (el) => {
   let sysInfo;
   try {
@@ -1151,7 +1020,7 @@ pages.settings = async (el) => {
         <tr><td style="color:var(--text2)">Hostname</td><td>${esc(sysInfo.hostname || '-')}</td></tr>
         <tr><td style="color:var(--text2)">Platform</td><td>${esc(sysInfo.platform || '-')} / ${esc(sysInfo.arch || '-')}</td></tr>
         <tr><td style="color:var(--text2)">Node.js</td><td>${esc(sysInfo.nodeVersion || '-')}</td></tr>
-        <tr><td style="color:var(--text2)">CPU</td><td>${sysInfo.cpuCount || '-'} × ${esc(sysInfo.cpuModel || '-')}</td></tr>
+        <tr><td style="color:var(--text2)">CPU</td><td>${sysInfo.cpuCount || '-'} ├ù ${esc(sysInfo.cpuModel || '-')}</td></tr>
         <tr><td style="color:var(--text2)">Total Memory</td><td>${fmtBytes(sysInfo.totalMemory || 0)}</td></tr>
         <tr><td style="color:var(--text2)">Total Disk</td><td>${fmtBytes(sysInfo.disk?.total || 0)}</td></tr>
       </table></div>
@@ -1163,7 +1032,7 @@ pages.settings = async (el) => {
         Status: ${nginxInfo.status === 'active' ? '<span class="badge badge-green">Active</span>' : `<span class="badge badge-red">${esc(nginxInfo.status)}</span>`}
         &nbsp; Config: ${nginxInfo.configValid ? '<span class="badge badge-green">Valid</span>' : '<span class="badge badge-red">Invalid</span>'}
       </div>
-      <button class="btn" onclick="reloadNginx()">🔄 Reload Nginx</button>
+      <button class="btn" onclick="reloadNginx()">≡ƒöä Reload Nginx</button>
     </div>
 
     <div class="card">
@@ -1176,7 +1045,7 @@ pages.settings = async (el) => {
 
 window.reloadNginx = async function() {
   try {
-    toast('Reloading nginx…', 'info');
+    toast('Reloading nginxΓÇª', 'info');
     const data = await api('/server/nginx/reload', { method: 'POST' });
     toast(data.ok ? 'Nginx reloaded' : 'Reload failed', data.ok ? 'success' : 'error');
   } catch (err) {
@@ -1184,7 +1053,7 @@ window.reloadNginx = async function() {
   }
 };
 
-// ── Boot ─────────────────────────────────────────────────
+// ΓöÇΓöÇ Boot ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 (function boot() {
   if (state.token) {
     showApp();
