@@ -1,0 +1,43 @@
+{
+  "name": "project-saver-bridge",
+  "displayName": "Project Saver Bridge",
+  "description": "Connects VS Code to your Project Saver dashboard — remote chat, workspace state, and Copilot relay",
+  "version": "0.1.0",
+  "publisher": "lemonspy",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "projectSaver.connect", "title": "Project Saver: Connect to Server" },
+      { "command": "projectSaver.disconnect", "title": "Project Saver: Disconnect" },
+      { "command": "projectSaver.status", "title": "Project Saver: Show Status" }
+    ],
+    "configuration": {
+      "title": "Project Saver Bridge",
+      "properties": {
+        "projectSaver.serverUrl": {
+          "type": "string",
+          "default": "http://45.79.138.133",
+          "description": "Project Saver server URL"
+        },
+        "projectSaver.email": {
+          "type": "string",
+          "default": "devin@marrazzo.net",
+          "description": "Login email"
+        },
+        "projectSaver.password": {
+          "type": "string",
+          "default": "Nexus2026!",
+          "description": "Login password"
+        },
+        "projectSaver.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-connect on VS Code startup"
+        }
+      }
+    }
+  }
+}

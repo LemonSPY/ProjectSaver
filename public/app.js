@@ -769,6 +769,11 @@ navigate = function(page) {
     clearInterval(screenInterval);
     screenInterval = null;
   }
+  // Clean up chat WS when leaving chat
+  if (page !== 'chat') {
+    if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
+    if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
+  }
   origNavigate(page);
 };
 
@@ -783,7 +788,342 @@ window.saveVSCodeSettings = async function() {
   }
 };
 
-// ── Page: Settings ───────────────────────────────────────
+// ── Page: Chat ───────────────────────────────────────────
+let chatWs = null;
+let chatWsReconnect = null;
+let chatStreamingId = null;
+let chatStreamingText = '';
+let chatIncludeContext = true;
+
+pages.chat = async (el) => {
+  // Disconnect previous WS
+  if (chatWs) { try { chatWs.close(); } catch {} chatWs = null; }
+  if (chatWsReconnect) { clearTimeout(chatWsReconnect); chatWsReconnect = null; }
+
+  el.innerHTML = `
+    <div class="chat-page">
+      <div class="chat-header" id="chat-header">
+        <div class="chat-header-left">
+          <div class="chat-status-dot" id="chat-ext-dot"></div>
+          <div>
+            <div class="chat-title" id="chat-title">Copilot Chat</div>
+            <div class="chat-subtitle" id="chat-subtitle">Connecting…</div>
+          </div>
+        </div>
+        <div class="chat-header-right">
+          <button class="btn btn-sm" id="chat-ctx-toggle" onclick="toggleChatContext()" title="Include workspace context">📎 Context</button>
+          <button class="btn btn-sm btn-danger" onclick="clearChatHistory()" title="Clear history">🗑️</button>
+        </div>
+      </div>
+
+      <div class="chat-messages" id="chat-messages">
+        <div class="chat-empty" id="chat-empty">
+          <div style="font-size:2.5rem;margin-bottom:.6rem">💬</div>
+          <p>Chat with Copilot through VS Code</p>
+          <p class="chat-empty-sub">Messages are sent to Copilot via your VS Code extension bridge</p>
+        </div>
+      </div>
+
+      <div class="chat-input-bar" id="chat-input-bar">
+        <div class="chat-workspace-badge" id="chat-workspace-badge" style="display:none"></div>
+        <div class="chat-input-row">
+          <textarea id="chat-input" placeholder="Ask Copilot anything…" rows="1"
+            autocomplete="off" autocorrect="on" spellcheck="true"></textarea>
+          <button class="chat-send-btn" id="chat-send-btn" onclick="sendChatMessage()" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Auto-resize textarea
+  const textarea = document.getElementById('chat-input');
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+    document.getElementById('chat-send-btn').disabled = !textarea.value.trim();
+  });
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (textarea.value.trim()) sendChatMessage();
+    }
+  });
+
+  // Connect WebSocket
+  connectChatWs();
+};
+
+window.toggleChatContext = function() {
+  chatIncludeContext = !chatIncludeContext;
+  const btn = document.getElementById('chat-ctx-toggle');
+  if (btn) {
+    btn.className = `btn btn-sm ${chatIncludeContext ? '' : 'btn-danger'}`;
+    btn.innerHTML = chatIncludeContext ? '📎 Context' : '📎 No Context';
+  }
+  toast(chatIncludeContext ? 'Workspace context included' : 'Context disabled', 'info');
+};
+
+function connectChatWs() {
+  if (!state.token) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${proto}//${location.host}/ws/chat?token=${encodeURIComponent(state.token)}`;
+
+  chatWs = new WebSocket(wsUrl);
+
+  chatWs.onopen = () => {
+    updateChatHeader(null, 'Connected');
+  };
+
+  chatWs.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleChatWsMessage(msg);
+    } catch {}
+  };
+
+  chatWs.onclose = () => {
+    updateChatHeader(false, 'Reconnecting…');
+    if (state.page === 'chat') {
+      chatWsReconnect = setTimeout(connectChatWs, 3000);
+    }
+  };
+
+  chatWs.onerror = () => {};
+}
+
+function handleChatWsMessage(msg) {
+  switch (msg.type) {
+    case 'init':
+      updateExtensionStatus(msg.connected);
+      updateWorkspaceInfo(msg.workspace);
+      renderChatMessages(msg.messages || []);
+      break;
+
+    case 'extension-status':
+      updateExtensionStatus(msg.connected);
+      break;
+
+    case 'workspace-state':
+      updateWorkspaceInfo(msg.workspace);
+      break;
+
+    case 'chat-message':
+      appendChatMessage(msg.message);
+      // If we were streaming this ID, stop
+      if (msg.message.role === 'assistant' && chatStreamingId) {
+        const streamEl = document.getElementById('chat-streaming');
+        if (streamEl) streamEl.remove();
+        chatStreamingId = null;
+        chatStreamingText = '';
+        enableChatInput(true);
+      }
+      break;
+
+    case 'chat-stream':
+      handleChatStream(msg);
+      break;
+
+    case 'chat-clear':
+      const msgContainer = document.getElementById('chat-messages');
+      if (msgContainer) {
+        msgContainer.innerHTML = `
+          <div class="chat-empty" id="chat-empty">
+            <div style="font-size:2.5rem;margin-bottom:.6rem">💬</div>
+            <p>Chat with Copilot through VS Code</p>
+            <p class="chat-empty-sub">Messages are sent to Copilot via your VS Code extension bridge</p>
+          </div>`;
+      }
+      break;
+  }
+}
+
+function updateExtensionStatus(connected) {
+  const dot = document.getElementById('chat-ext-dot');
+  if (dot) {
+    dot.className = 'chat-status-dot ' + (connected ? 'online' : 'offline');
+    dot.title = connected ? 'VS Code extension connected' : 'VS Code extension disconnected';
+  }
+}
+
+function updateWorkspaceInfo(ws) {
+  if (!ws) return;
+  const title = document.getElementById('chat-title');
+  const subtitle = document.getElementById('chat-subtitle');
+  const badge = document.getElementById('chat-workspace-badge');
+
+  if (title && ws.workspace) {
+    title.textContent = ws.workspace || 'Copilot Chat';
+  }
+  if (subtitle) {
+    const parts = [];
+    if (ws.activeFile) parts.push(ws.activeFile);
+    if (ws.activeLanguage) parts.push(ws.activeLanguage);
+    subtitle.textContent = parts.join(' • ') || 'No file open';
+  }
+  if (badge && ws.activeFile) {
+    badge.style.display = '';
+    badge.innerHTML = `<span class="badge badge-blue" style="font-size:.72rem">📄 ${esc(ws.activeFile)}</span>`;
+  }
+}
+
+function updateChatHeader(connected, statusText) {
+  const subtitle = document.getElementById('chat-subtitle');
+  if (subtitle && statusText) subtitle.textContent = statusText;
+  if (connected !== null) updateExtensionStatus(connected);
+}
+
+function renderChatMessages(messages) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  if (messages.length === 0) return;
+
+  const empty = document.getElementById('chat-empty');
+  if (empty) empty.style.display = 'none';
+
+  const fragment = document.createDocumentFragment();
+  for (const msg of messages) {
+    fragment.appendChild(createChatBubble(msg));
+  }
+  container.appendChild(fragment);
+  container.scrollTop = container.scrollHeight;
+}
+
+function appendChatMessage(msg) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const empty = document.getElementById('chat-empty');
+  if (empty) empty.style.display = 'none';
+
+  container.appendChild(createChatBubble(msg));
+  container.scrollTop = container.scrollHeight;
+}
+
+function createChatBubble(msg) {
+  const div = document.createElement('div');
+  div.className = `chat-bubble chat-bubble-${msg.role}`;
+  div.setAttribute('data-id', msg.id || '');
+
+  const label = document.createElement('div');
+  label.className = 'chat-bubble-label';
+  label.textContent = msg.role === 'user' ? 'You' : 'Copilot';
+
+  const content = document.createElement('div');
+  content.className = 'chat-bubble-content';
+  if (msg.role === 'assistant') {
+    content.innerHTML = renderMarkdown(msg.text || '');
+  } else {
+    content.textContent = msg.text || '';
+  }
+
+  const time = document.createElement('div');
+  time.className = 'chat-bubble-time';
+  const d = new Date(msg.timestamp || Date.now());
+  time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  if (msg.error) div.classList.add('chat-bubble-error');
+
+  div.appendChild(label);
+  div.appendChild(content);
+  div.appendChild(time);
+  return div;
+}
+
+function handleChatStream(msg) {
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const empty = document.getElementById('chat-empty');
+  if (empty) empty.style.display = 'none';
+
+  chatStreamingId = msg.id;
+  chatStreamingText = msg.partial || '';
+
+  let streamEl = document.getElementById('chat-streaming');
+  if (!streamEl) {
+    streamEl = document.createElement('div');
+    streamEl.id = 'chat-streaming';
+    streamEl.className = 'chat-bubble chat-bubble-assistant chat-streaming';
+    streamEl.innerHTML = `
+      <div class="chat-bubble-label">Copilot</div>
+      <div class="chat-bubble-content"></div>
+      <div class="chat-typing-indicator"><span></span><span></span><span></span></div>`;
+    container.appendChild(streamEl);
+  }
+
+  const content = streamEl.querySelector('.chat-bubble-content');
+  if (content) content.innerHTML = renderMarkdown(chatStreamingText);
+
+  const typing = streamEl.querySelector('.chat-typing-indicator');
+  if (typing && chatStreamingText.length > 0) typing.style.display = 'none';
+
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = esc(text);
+  // Code blocks
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="chat-code"><code>$2</code></pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code class="chat-inline-code">$1</code>');
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Headings
+  html = html.replace(/^### (.+)$/gm, '<strong style="font-size:1rem">$1</strong>');
+  html = html.replace(/^## (.+)$/gm, '<strong style="font-size:1.05rem">$1</strong>');
+  html = html.replace(/^# (.+)$/gm, '<strong style="font-size:1.1rem">$1</strong>');
+  // Bullets
+  html = html.replace(/^- (.+)$/gm, '• $1');
+  html = html.replace(/^\* (.+)$/gm, '• $1');
+  // Line breaks
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
+function enableChatInput(enabled) {
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('chat-send-btn');
+  if (input) { input.disabled = !enabled; if (enabled) input.focus(); }
+  if (btn) btn.disabled = !enabled || !(input && input.value.trim());
+}
+
+window.sendChatMessage = async function() {
+  const input = document.getElementById('chat-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  enableChatInput(false);
+
+  try {
+    await api('/chat/send', {
+      method: 'POST',
+      body: { text, includeContext: chatIncludeContext },
+    });
+  } catch (err) {
+    toast('Chat error: ' + err.message, 'error');
+    enableChatInput(true);
+  }
+};
+
+window.clearChatHistory = async function() {
+  if (!confirm('Clear all chat history?')) return;
+  try {
+    await api('/chat/history', { method: 'DELETE' });
+    toast('Chat cleared', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+};
 pages.settings = async (el) => {
   let sysInfo;
   try {

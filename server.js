@@ -463,9 +463,161 @@ app.post('/api/server/nginx/reload', requireAuth, (_req, res) => {
   res.json({ ok: result.ok, output: result.output });
 });
 
-// ── SPA fallback ────────────────────────────────────────────
+// ── Chat state ──────────────────────────────────────────────
+let extensionWs = null;       // The VS Code extension connection
+let workspaceState = {};      // Latest workspace state from extension
+let chatMessages = [];        // Chat history
+let chatListeners = new Set(); // Dashboard WS connections listening for chat
+let pendingChats = new Map();  // id → { resolve, timer }
+const MAX_CHAT_HISTORY = 100;
+
+// Chat REST API
+app.get('/api/chat/history', requireAuth, (_req, res) => {
+  res.json({ messages: chatMessages, workspace: workspaceState });
+});
+
+app.post('/api/chat/send', requireAuth, (req, res) => {
+  const { text, includeContext } = req.body || {};
+  if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text required' });
+  if (text.length > 10000) return res.status(400).json({ error: 'Message too long' });
+
+  if (!extensionWs || extensionWs.readyState !== 1) {
+    return res.status(503).json({ error: 'VS Code extension not connected' });
+  }
+
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+  // Store user message
+  const userMsg = { id: id + '-user', role: 'user', text, timestamp: Date.now() };
+  chatMessages.push(userMsg);
+  if (chatMessages.length > MAX_CHAT_HISTORY) chatMessages = chatMessages.slice(-MAX_CHAT_HISTORY);
+  broadcastChat({ type: 'chat-message', message: userMsg });
+
+  // Send to extension
+  extensionWs.send(JSON.stringify({ type: 'chat-request', id, text, includeContext: includeContext !== false }));
+
+  // Wait for response (up to 120s)
+  const timeout = setTimeout(() => {
+    if (pendingChats.has(id)) {
+      pendingChats.delete(id);
+      res.json({ ok: false, error: 'Timeout waiting for response' });
+    }
+  }, 120000);
+
+  pendingChats.set(id, {
+    resolve: (data) => {
+      clearTimeout(timeout);
+      pendingChats.delete(id);
+      res.json({ ok: true, ...data });
+    },
+  });
+});
+
+app.get('/api/chat/workspace', requireAuth, (_req, res) => {
+  res.json({
+    connected: extensionWs && extensionWs.readyState === 1,
+    workspace: workspaceState,
+  });
+});
+
+app.delete('/api/chat/history', requireAuth, (_req, res) => {
+  chatMessages = [];
+  broadcastChat({ type: 'chat-clear' });
+  res.json({ ok: true });
+});
+
+// ── SPA fallback (must be AFTER all API routes) ─────────────
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+function broadcastChat(data) {
+  const msg = JSON.stringify(data);
+  chatListeners.forEach(ws => {
+    try { if (ws.readyState === 1) ws.send(msg); } catch {}
+  });
+}
+
+// ── WebSocket: Extension connection ─────────────────────────
+const wssExtension = new WebSocketServer({ server, path: '/ws/extension' });
+
+wssExtension.on('connection', (ws, req) => {
+  const urlParams = new URL(req.url, 'http://localhost').searchParams;
+  const tkn = urlParams.get('token');
+  try { jwt.verify(tkn, JWT_SECRET); } catch { ws.close(4001, 'Unauthorized'); return; }
+
+  console.log('[ws] VS Code extension connected');
+  extensionWs = ws;
+  broadcastChat({ type: 'extension-status', connected: true });
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+
+      if (msg.type === 'workspace-state') {
+        workspaceState = msg;
+        broadcastChat({ type: 'workspace-state', workspace: msg });
+      }
+
+      if (msg.type === 'chat-response') {
+        // Store assistant message
+        const assistantMsg = {
+          id: msg.id + '-assistant',
+          role: 'assistant',
+          text: msg.text,
+          error: msg.error,
+          timestamp: msg.timestamp || Date.now(),
+        };
+        chatMessages.push(assistantMsg);
+        if (chatMessages.length > MAX_CHAT_HISTORY) chatMessages = chatMessages.slice(-MAX_CHAT_HISTORY);
+        broadcastChat({ type: 'chat-message', message: assistantMsg });
+
+        // Resolve pending HTTP request
+        if (pendingChats.has(msg.id)) {
+          pendingChats.get(msg.id).resolve({ text: msg.text, error: msg.error });
+        }
+      }
+
+      if (msg.type === 'chat-response-stream') {
+        broadcastChat({ type: 'chat-stream', id: msg.id, chunk: msg.chunk, partial: msg.partial });
+      }
+
+      if (msg.type === 'pong') { /* keepalive */ }
+    } catch {}
+  });
+
+  ws.on('close', () => {
+    console.log('[ws] VS Code extension disconnected');
+    if (extensionWs === ws) extensionWs = null;
+    broadcastChat({ type: 'extension-status', connected: false });
+  });
+
+  // Keepalive ping every 30s
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
+    else clearInterval(pingInterval);
+  }, 30000);
+});
+
+// ── WebSocket: Dashboard chat listener ──────────────────────
+const wssChat = new WebSocketServer({ server, path: '/ws/chat' });
+
+wssChat.on('connection', (ws, req) => {
+  const urlParams = new URL(req.url, 'http://localhost').searchParams;
+  const tkn = urlParams.get('token');
+  try { jwt.verify(tkn, JWT_SECRET); } catch { ws.close(4001, 'Unauthorized'); return; }
+
+  chatListeners.add(ws);
+
+  // Send current state
+  ws.send(JSON.stringify({
+    type: 'init',
+    connected: extensionWs && extensionWs.readyState === 1,
+    workspace: workspaceState,
+    messages: chatMessages,
+  }));
+
+  ws.on('close', () => chatListeners.delete(ws));
 });
 
 // ── WebSocket for live logs ─────────────────────────────────
